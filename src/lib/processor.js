@@ -184,14 +184,21 @@ export function renderFrame(ctx, video, tracker, opts, people) {
 // frames are presented/detected — a speed/temporal-resolution trade-off). The
 // recording is then physically shorter; onCaptured(seconds) reports the actual
 // wall-time so the caller can restore the correct duration with ffmpeg setpts.
-export function processVideo({ video, canvas, opts, people, onProgress, onCaptured }) {
+export function processVideo({ video, canvas, opts, people, onProgress, onCaptured, onFps }) {
   return new Promise((resolve, reject) => {
     const ctx = canvas.getContext('2d');
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     const tracker = new Tracker();
 
-    const stream = canvas.captureStream(opts.fps || 30);
+    // Sample the canvas fast enough that speeding playback up doesn't throw away
+    // temporal resolution: at captureSpeed N the wall-clock pass is 1/N as long,
+    // so we need ~N× the stream fps to keep the same number of source frames in
+    // the matte. Capped at 60 (display/compositor limit). At speed 1 this is just
+    // the base fps. Effective mask fps ≈ capFps / captureSpeed.
+    const baseFps = opts.fps || 30;
+    const capFps = Math.min(60, baseFps * (opts.captureSpeed || 1));
+    const stream = canvas.captureStream(capFps);
     const mimeType = pickMime();
     const recorder = new MediaRecorder(stream, {
       mimeType,
@@ -199,9 +206,16 @@ export function processVideo({ video, canvas, opts, people, onProgress, onCaptur
     });
     const chunks = [];
     let startedAt = 0, capturedSec = 0;
+    // Measure the SOURCE video's real frame rate from the presented-frame metadata
+    // (mediaTime is in media-seconds, independent of captureSpeed). The encode is
+    // then resampled to this so the MP4 matches the input's fps — MediaRecorder's
+    // WebM has only a 1kHz timebase and no true fps, so without a target ffmpeg
+    // would guess ~1000fps and pad the file with ~30× duplicate frames.
+    let firstMediaTime = null, lastMediaTime = null, frameCount = 0, srcFps = 0;
     recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
     recorder.onstop = () => {
       onCaptured?.(capturedSec);
+      onFps?.(srcFps);
       resolve(new Blob(chunks, { type: 'video/webm' }));
     };
     recorder.onerror = (e) => reject(e.error || new Error('recorder error'));
@@ -211,13 +225,20 @@ export function processVideo({ video, canvas, opts, people, onProgress, onCaptur
       if (stopped) return;
       stopped = true;
       capturedSec = startedAt ? (performance.now() - startedAt) / 1000 : 0;
+      const span = (lastMediaTime ?? 0) - (firstMediaTime ?? 0);
+      if (frameCount > 1 && span > 0) srcFps = (frameCount - 1) / span;
       video.pause();
       video.playbackRate = 1;
       if (recorder.state !== 'inactive') recorder.stop();
     };
 
-    const tick = () => {
+    const tick = (now, meta) => {
       if (stopped) return;
+      if (meta) {
+        if (firstMediaTime == null) firstMediaTime = meta.mediaTime;
+        lastMediaTime = meta.mediaTime;
+        frameCount++;
+      }
       renderFrame(ctx, video, tracker, opts, people);
       onProgress?.(video.duration ? video.currentTime / video.duration : 0);
       if (video.ended) { finish(); return; }
@@ -225,14 +246,34 @@ export function processVideo({ video, canvas, opts, people, onProgress, onCaptur
     };
 
     video.muted = true;
-    video.currentTime = 0;
     video.playbackRate = opts.captureSpeed || 1;
     video.onended = finish;
-    video.play().then(() => {
-      startedAt = performance.now();
+
+    // Start the recorder only AFTER seeking to 0 and painting the first frame, so
+    // t≈0 is actually captured. Otherwise MediaRecorder records a few stale/blank
+    // canvas frames while the first requestVideoFrameCallback is still pending, and
+    // the un-awaited seek means playback can even begin before we've reached 0 — at
+    // high captureSpeed that lost head is several tenths of a second of *source*
+    // time, leaving the opening of the video un-obscured.
+    const begin = () => {
+      renderFrame(ctx, video, tracker, opts, people); // paint the t≈0 matte first
       recorder.start();
-      video.requestVideoFrameCallback(tick);
-    }).catch(reject);
+      startedAt = performance.now();
+      video.play()
+        .then(() => video.requestVideoFrameCallback(tick))
+        .catch(reject);
+    };
+    const seekStart = () => {
+      if (Math.abs(video.currentTime) < 1e-3) { begin(); return; }
+      const onSeeked = () => { video.removeEventListener('seeked', onSeeked); begin(); };
+      video.addEventListener('seeked', onSeeked);
+      video.currentTime = 0;
+    };
+    if (video.readyState >= 2) seekStart();
+    else video.addEventListener('loadeddata', function onLoaded() {
+      video.removeEventListener('loadeddata', onLoaded);
+      seekStart();
+    });
   });
 }
 
@@ -290,9 +331,21 @@ export function processRegions({ video, canvas, opts, people, onProgress }) {
     };
 
     video.muted = true;
-    video.currentTime = 0;
     video.playbackRate = opts.captureSpeed || 1;
     video.onended = finish;
-    video.play().then(() => video.requestVideoFrameCallback(tick)).catch(reject);
+    // Seek to 0 and wait for it to land before playing, so the first collected
+    // frame is actually the start of the video (see processVideo for the rationale).
+    const begin = () => video.play().then(() => video.requestVideoFrameCallback(tick)).catch(reject);
+    const seekStart = () => {
+      if (Math.abs(video.currentTime) < 1e-3) { begin(); return; }
+      const onSeeked = () => { video.removeEventListener('seeked', onSeeked); begin(); };
+      video.addEventListener('seeked', onSeeked);
+      video.currentTime = 0;
+    };
+    if (video.readyState >= 2) seekStart();
+    else video.addEventListener('loadeddata', function onLoaded() {
+      video.removeEventListener('loadeddata', onLoaded);
+      seekStart();
+    });
   });
 }

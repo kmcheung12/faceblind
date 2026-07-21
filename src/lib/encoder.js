@@ -101,7 +101,7 @@ function parseTime(msg) {
 // lets us derive progress from ffmpeg's log (WebM from MediaRecorder has no
 // duration metadata, so ffmpeg's own `progress` event never yields a fraction).
 // Returns an MP4 Blob.
-export async function encodeMp4(videoBlob, audioSource, onProgress, durationHint = 0) {
+export async function encodeMp4(videoBlob, audioSource, onProgress, durationHint = 0, fps = 30) {
   if (!loaded) throw new Error('ffmpeg not initialized');
 
   // Clear any progress/log handlers from a previous run so they don't stack.
@@ -153,6 +153,13 @@ export async function encodeMp4(videoBlob, audioSource, onProgress, durationHint
     '-preset', 'veryfast',
     '-pix_fmt', 'yuv420p',
     '-crf', '23',
+    // Resample to the source video's frame rate (measured by the caller). The
+    // MediaRecorder WebM carries only a 1kHz (millisecond) timebase and no real
+    // fps, so without a target ffmpeg guesses ~1000fps and emits a file padded
+    // with ~30× duplicate frames — bloated and vastly slower to encode. Matching
+    // the input fps yields a normal clip (~source frame count) and a fast encode.
+    '-fps_mode', 'cfr',
+    '-r', String(fps),
     ...(hasAudio ? ['-c:a', 'aac', '-b:a', '160k'] : []),
     '-movflags', '+faststart',
     '-shortest',

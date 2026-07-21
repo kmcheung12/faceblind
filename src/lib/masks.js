@@ -1,6 +1,13 @@
 // Manual masks: user-drawn boxes with keyframes over time. Between keyframes the
 // box position/size is linearly interpolated, so you can set a box at one frame,
 // scrub, move it at another, and it tweens — i.e. adjust it frame by frame.
+//
+// Masks also have a temporal LIFESPAN [start, end): a mask only exists between the
+// time it was added and the time it was ended. Editing a mask is thus a function
+// of time — add at t=0, tweak at t=1, end at t=2 and the mask is present on
+// [0, 2) and gone afterwards. `end === Infinity` means "until the video ends".
+// Every consumer (preview + all export passes) reads boxes through maskBoxAt, so
+// gating that one function on the lifespan makes the whole pipeline honor it.
 
 let _id = 1;
 // kind: 'mask' applies an effect; 'ignore' draws nothing and instead suppresses
@@ -8,9 +15,28 @@ let _id = 1;
 // pin: when a mask was adopted from an auto-detection, the original detection box
 // — auto-detections overlapping it are suppressed so the adopted mask (which you
 // can now move freely) controls coverage instead of the raw detection.
+// start/end: the mask's active time window (seconds). Defaults to "from when it
+// was added, until the end of the video".
 export function newMask({ x, y, w, h, t, effect = 'inherit', emoji = '😀', kind = 'mask', pin = null }) {
-  return { id: _id++, kind, effect, emoji, pin, keyframes: [{ t, x, y, w, h }] };
+  return { id: _id++, kind, effect, emoji, pin, start: t, end: Infinity, keyframes: [{ t, x, y, w, h }] };
 }
+
+// True if the mask is alive at time t. The lifespan is the half-open interval
+// [start, end): visible from `start` up to but NOT including `end`, so trimming
+// the end at a frame (via the ✕ badge) makes the mask disappear on that very
+// frame — immediate feedback, and "add at 0, end at 10" ⇒ visible on [0, 10).
+// Old masks (pre-lifespan) with no start/end are treated as always-on.
+export function maskActiveAt(mask, t) {
+  const start = mask.start ?? -Infinity;
+  const end = mask.end ?? Infinity;
+  return t >= start - EPS && t < end;
+}
+
+// Set the mask's active window to end at time t (temporal delete: it stays before
+// t, disappears after). Symmetric helper for the start edge too.
+export function endMaskAt(mask, t) { mask.end = t; return mask; }
+export function startMaskAt(mask, t) { mask.start = t; return mask; }
+export function clearLifespan(mask) { mask.start = 0; mask.end = Infinity; return mask; }
 
 const EPS = 0.04; // seconds — keyframes closer than this are treated as the same
 
@@ -34,8 +60,11 @@ export function hasKeyframeAt(mask, t) {
 
 const pick = (k) => ({ x: k.x, y: k.y, w: k.w, h: k.h });
 
-// Interpolated box for a mask at time t. Holds first/last value outside the range.
+// Interpolated box for a mask at time t, or null if the mask isn't alive at t.
+// Within its lifespan it holds the first/last keyframe value outside the
+// keyframed range (so a one-keyframe mask still covers its whole window).
 export function maskBoxAt(mask, t) {
+  if (!maskActiveAt(mask, t)) return null;
   const kfs = mask.keyframes;
   if (!kfs.length) return null;
   if (t <= kfs[0].t) return pick(kfs[0]);
@@ -56,6 +85,7 @@ export function maskBoxAt(mask, t) {
 export function suppressBoxesAt(masks, t) {
   const out = [];
   for (const m of masks || []) {
+    if (!maskActiveAt(m, t)) continue; // a mask only suppresses while it's alive
     if (m.kind === 'ignore') { const b = maskBoxAt(m, t); if (b) out.push(b); }
     else if (m.pin) out.push(m.pin);
   }

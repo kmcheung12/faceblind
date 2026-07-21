@@ -7,7 +7,7 @@
   import { initPose } from './lib/pose.js';
   import { initFFmpeg, encodeMp4, normalizeInput } from './lib/encoder.js';
   import { applyEffect } from './lib/effects.js';
-  import { newMask, setKeyframe, maskBoxAt, hasKeyframeAt, removeKeyframeAt, suppressBoxesAt, boxSuppressed } from './lib/masks.js';
+  import { newMask, setKeyframe, maskBoxAt, hasKeyframeAt, removeKeyframeAt, suppressBoxesAt, boxSuppressed, endMaskAt, startMaskAt, clearLifespan } from './lib/masks.js';
 
   const EMOJIS = ['😀', '🙂', '😎', '🤡', '👽', '🐱', '🐶', '🦊', '🐵', '🎃', '🌚', '⬛'];
 
@@ -301,7 +301,7 @@
         for (const [hx, hy] of Object.values(corners(b)))
           ctx.fillRect(hx - hs / 2, hy - hs / 2, hs, hs);
       }
-      drawXHandle(ctx, b, hs, '#f85149'); // X = remove this ignore (re-enable detection)
+      drawXHandle(ctx, b, hs, '#f85149'); // X = end ignore here (re-enable detection from here on)
     }
     ctx.restore();
 
@@ -325,7 +325,7 @@
         for (const [hx, hy] of Object.values(corners(b)))
           ctx.fillRect(hx - hs / 2, hy - hs / 2, hs, hs);
       }
-      drawXHandle(ctx, b, hs, sel ? '#4f9dff' : '#8be9fd'); // X = delete this mask
+      drawXHandle(ctx, b, hs, sel ? '#4f9dff' : '#8be9fd'); // X = end mask here (temporal trim)
       ctx.restore();
     }
   }
@@ -358,11 +358,13 @@
     // masks mode
     const time = videoEl.currentTime || 0;
     const hs = HS();
-    // 0) delete/disable "X" badge (upper-right of every box). Checked first since
-    //    it sits on the top-right corner. Manual masks + ignore regions...
+    // 0) "X" badge (upper-right of every box) ENDS the mask at the current frame
+    //    (temporal trim: kept before now, gone from here on). Checked first since
+    //    it sits on the top-right corner. To wipe a mask across all time use its
+    //    chip ✕ or the Delete key. Manual masks + ignore regions...
     for (let i = masks.length - 1; i >= 0; i--) {
       const b = maskBoxAt(masks[i], time);
-      if (b && xHandleHit(b, p, hs)) { deleteMask(masks[i].id); return; }
+      if (b && xHandleHit(b, p, hs)) { endMaskHere(masks[i].id); return; }
     }
     //    ...and auto-detected boxes (X disables the raw detection via an ignore region).
     const suppressed = suppressBoxesAt(masks, time);
@@ -490,6 +492,41 @@
     editMode = 'masks';
     previewCurrent();
   }
+  // Temporal delete: end the mask at the current frame so it's kept before now
+  // and gone from here on. Ending at/before its start means it never shows → drop
+  // it entirely instead.
+  function endMaskHere(id) {
+    const m = masks.find((x) => x.id === id);
+    if (!m) return;
+    const t = videoEl.currentTime || 0;
+    if (t <= (m.start ?? 0) + 0.001) { deleteMask(id); return; }
+    endMaskAt(m, t);
+    masks = masks;
+    // An ignore/pinned mask ending here restores the detection after now → re-bake.
+    if (m.kind === 'ignore' || m.pin) previewCurrent();
+    else redraw();
+  }
+  // Lifespan controls for the selected mask (panel buttons).
+  function setMaskStartHere() {
+    if (!selectedMask) return;
+    startMaskAt(selectedMask, videoEl.currentTime || 0);
+    masks = masks;
+    if (selectedMask.kind === 'ignore' || selectedMask.pin) previewCurrent(); else redraw();
+  }
+  function setMaskEndHere() {
+    if (!selectedMask) return;
+    endMaskAt(selectedMask, videoEl.currentTime || 0);
+    masks = masks;
+    if (selectedMask.kind === 'ignore' || selectedMask.pin) previewCurrent(); else redraw();
+  }
+  function clearMaskLifespan() {
+    if (!selectedMask) return;
+    clearLifespan(selectedMask);
+    masks = masks;
+    if (selectedMask.kind === 'ignore' || selectedMask.pin) previewCurrent(); else redraw();
+  }
+  const fmtT = (t) => (t === Infinity || t == null ? 'end' : `${(+t).toFixed(2)}s`);
+
   function deleteMask(id) {
     const removed = masks.find((m) => m.id === id);
     masks = masks.filter((m) => m.id !== id);
@@ -589,12 +626,14 @@
     procProgress = 0; encProgress = 0;
     statusMsg = 'Processing frames…';
     try {
+      let srcFps = 0;
       const webm = await processVideo({
         video: videoEl,
         canvas: canvasEl,
         opts: { ...opts, showBoxes: false },
         people,
         onProgress: (p) => (procProgress = p),
+        onFps: (f) => (srcFps = f),
       });
       console.log('[FaceBlind][run] recorded webm', {
         MB: +((webm?.size || 0) / 1e6).toFixed(2), durationSec: +(videoEl.duration || 0).toFixed(2),
@@ -605,7 +644,11 @@
       statusMsg = 'Loading ffmpeg.wasm…';
       await initFFmpeg((m) => (ffmpegLog = m));
       statusMsg = 'Encoding MP4 (+ original audio)…';
-      const mp4 = await encodeMp4(webm, file, (p) => (encProgress = p), videoEl.duration || 0);
+      // Match the output fps to the SOURCE video (measured during the pass), so we
+      // don't inherit MediaRecorder's bogus ~1000fps timebase. Fall back to 30.
+      const outFps = srcFps > 1 ? Math.round(srcFps) : (opts.fps || 30);
+      console.log('[FaceBlind][run] measured source fps', { srcFps: +srcFps.toFixed(2), outFps });
+      const mp4 = await encodeMp4(webm, file, (p) => (encProgress = p), videoEl.duration || 0, outFps);
 
       resultURL = URL.createObjectURL(mp4);
       phase = 'done';
@@ -660,7 +703,9 @@
   // frames presented/detected — a speed vs. temporal-resolution trade-off). The
   // recorded webm is shipped as-is (NO in-browser re-encode), and re-timed to the
   // true duration by a `setpts` in the *local* ffmpeg command (native = fast).
-  const CAPTURE_SPEED = 6;
+  // Effective mask fps ≈ min(60, sourceFps × speed) / speed, so 4× → ~15fps of
+  // source coverage (6× gave a coarse ~5fps that lagged fast movement).
+  const CAPTURE_SPEED = 4;
   let maskStretch = CAPTURE_SPEED; // dur / actual-capture-seconds, for the command
   async function downloadMask() {
     if (!ready) return;
@@ -869,16 +914,13 @@
         <button on:click={() => onFile(null) || (videoURL = '', ready = false)}>Change video</button>
       </div>
 
-      {#if selectedMask}
-        <div class="row" style="margin-top:12px">
-          <button on:click={deleteSelected}>🗑 Delete selected</button>
-        </div>
-      {/if}
-
       <p class="hint">
-        <b>Drag on the video to draw a mask</b> over a head. Drag inside to move it, drag a corner to resize,
-        <kbd>Delete</kbd> to remove. Scrub to another frame and move it again — positions
-        <b>tween between keyframes</b> (orange dot = keyframe here). Masks are always applied on export.
+        <b>Drag on the video to draw a mask</b> over a head. Drag inside to move it, drag a corner to resize.
+        Scrub to another frame and move it again — positions <b>tween between keyframes</b> (orange dot =
+        keyframe here). A mask is <b>a function of time</b>: it lives from where you add it to where you end
+        it. Click the box's <b>top-right ✕ to end the mask at the current frame</b> (kept before, gone from
+        there on); to remove it across all time use its chip ✕ or <kbd>Delete</kbd>. Masks are applied on
+        export only while they're active.
       </p>
       <p class="hint">
         <b>Detection wonky?</b> Click a dashed detection box on the video to <b>adopt</b> it into an editable
@@ -971,6 +1013,14 @@
               <button on:click={removeKeyframeHere} disabled={selectedMask.keyframes.length <= 1}>− Remove</button>
             </div>
           </div>
+          <div class="col" style="gap:4px">
+            <span class="hint">Active {fmtT(selectedMask.start)} → {fmtT(selectedMask.end)}</span>
+            <div class="row" style="gap:6px">
+              <button on:click={setMaskStartHere} title="Mask begins at the current frame">⇥ Start here</button>
+              <button on:click={setMaskEndHere} title="Mask ends at the current frame (kept before, gone after)">End here ⇤</button>
+              <button on:click={clearMaskLifespan} disabled={(selectedMask.start ?? 0) === 0 && (selectedMask.end ?? Infinity) === Infinity} title="Active for the whole video">Whole video</button>
+            </div>
+          </div>
         </div>
       {/if}
       <div class="chips">
@@ -981,7 +1031,7 @@
                 🚫 Ignore {i + 1} · detection off · {m.keyframes.length}kf
               {:else}
                 {m.pin ? '📌' : 'Mask'} {i + 1} · {m.effect === 'inherit' ? effect : m.effect}{m.effect === 'emoji' || (m.effect === 'inherit' && effect === 'emoji') ? ' ' + m.emoji : ''} · {m.keyframes.length}kf
-              {/if}
+              {/if}{#if (m.start ?? 0) > 0 || (m.end ?? Infinity) !== Infinity} · ⏱ {fmtT(m.start)}→{fmtT(m.end)}{/if}
             </button>
             <button on:click={() => deleteMask(m.id)}>✕</button>
           </div>
