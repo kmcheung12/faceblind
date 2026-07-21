@@ -33,7 +33,3 @@ CDNs on first use; ffmpeg core is loaded lazily on first export.
 - Processing runs in **realtime playback** (capture-as-it-plays). On slow
   machines heavy frames may drop; detection with BlazeFace is normally fast
   enough to keep up.
-- Identity matching uses a distance threshold (default 0.55). Enroll multiple
-  photos of the same person for more robust matching.
-- No cross-origin isolation headers are needed because the single-threaded
-  ffmpeg core avoids `SharedArrayBuffer`.
