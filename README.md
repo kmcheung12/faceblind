@@ -11,10 +11,15 @@ MP4. **Everything runs locally in the browser; no video ever leaves the machine.
 - **Vite + Svelte** — app shell / UI.
 - **MediaPipe Tasks Vision** (`FaceDetector`, BlazeFace short-range) — fast
   per-frame face detection (box + keypoints).
+- **MediaPipe Pose Landmarker** (`pose_landmarker_full`) — derives a head box
+  from body pose to cover heads that are **turned away, distant, or steeply
+  angled**, which face detection misses. Optional (toggle in the UI); the ~9 MB
+  model loads lazily in the background.
 - **@vladmandic/face-api** (recognition net) — 128-d face descriptors for
   identity matching (MediaPipe has no JS face-embedding task).
 - **ffmpeg.wasm** (single-threaded core) — transcodes the processed canvas
-  recording to H.264 MP4 and muxes the original audio back in.
+  recording to H.264 MP4 and muxes the original audio back in. Also used to
+  **convert incompatible inputs** (see below).
 
 ## Run
 
@@ -45,6 +50,35 @@ Then open the printed URL (e.g. http://localhost:8000) in Chrome.
 Requires a Chromium-based browser (uses `requestVideoFrameCallback`,
 `canvas.captureStream`, `MediaRecorder`, WebGL). Models are fetched from public
 CDNs on first use; ffmpeg core is loaded lazily on first export.
+
+## Manual mask editing
+
+Auto-detection isn't perfect, so you can edit coverage by hand on the preview
+canvas:
+
+- **Draw a mask** by dragging over any region; drag inside to move it, drag a
+  corner to resize.
+- **Keyframes over time** — scrub to another frame and move/resize the mask and
+  it sets a keyframe there; positions **tween between keyframes** so a mask can
+  follow a head frame by frame.
+- **Time-scoped lifespan** — a mask is a function of time: it lives from where
+  you add it until where you end it. The box's top-right **✕ ends the mask at
+  the current frame** (kept before, gone after); the chip ✕ / <kbd>Delete</kbd>
+  removes it across all time.
+- **← / →** step one frame at a time for precise placement (**Shift** = 10 frames).
+- **Fix a bad detection** — click a detection box to adopt it into an editable
+  mask, or drop a 🚫 *ignore* region over a false detection to skip it.
+
+Per-mask effect/emoji overrides are respected, and masks are always applied on
+export.
+
+## Convert for compatibility
+
+Some inputs (notably iPhone **HEVC / 10-bit** `.mov`, or rotated footage) can't
+be decoded by the `<video>` element. When that's detected the app offers a
+**Convert for compatibility** step that transcodes the file to 8-bit H.264
+(rotation baked in) with ffmpeg.wasm, then reloads the pipeline from the
+decodable version. Everything still stays on your machine.
 
 ## Notes / limitations
 

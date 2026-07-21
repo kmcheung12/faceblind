@@ -464,10 +464,22 @@
     if (selectedMaskId != null) deleteMask(selectedMaskId);
   }
   function onWindowKey(e) {
-    if (editMode !== 'masks' || selectedMaskId == null) return;
     const tag = (e.target?.tagName || '').toLowerCase();
     if (tag === 'input' || tag === 'select' || tag === 'textarea') return;
-    if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteSelected(); }
+    // ← / → step one frame at a time (Shift = 10 frames) for precise scrubbing.
+    if (ready && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+      e.preventDefault();
+      const frames = e.shiftKey ? 10 : 1;
+      const step = frames / (opts.fps || 30);
+      const dur = videoEl.duration || 0;
+      const dir = e.key === 'ArrowRight' ? 1 : -1;
+      videoEl.currentTime = Math.max(0, Math.min(dur, (videoEl.currentTime || 0) + dir * step));
+      return;
+    }
+    if (editMode === 'masks' && selectedMaskId != null && (e.key === 'Delete' || e.key === 'Backspace')) {
+      e.preventDefault();
+      deleteSelected();
+    }
   }
 
   // ---- mask operations ----
@@ -913,11 +925,15 @@
           on:input={(e) => { videoEl.currentTime = +e.target.value; }} />
         <button on:click={() => onFile(null) || (videoURL = '', ready = false)}>Change video</button>
       </div>
+      <p class="hint" style="margin-top:6px">
+        Drag the slider to scrub, or press <kbd>←</kbd> / <kbd>→</kbd> to step one frame
+        (<kbd>Shift</kbd>+<kbd>←</kbd>/<kbd>→</kbd> jumps 10 frames).
+      </p>
 
       <p class="hint">
         <b>Drag on the video to draw a mask</b> over a head. Drag inside to move it, drag a corner to resize.
-        Scrub to another frame and move it again — positions <b>tween between keyframes</b> (orange dot =
-        keyframe here). A mask is <b>a function of time</b>: it lives from where you add it to where you end
+        Scrub to another frame (<kbd>←</kbd>/<kbd>→</kbd> step one frame, <kbd>Shift</kbd> = 10) and move it
+        again — positions <b>tween between keyframes</b> (orange dot = keyframe here). A mask is <b>a function of time</b>: it lives from where you add it to where you end
         it. Click the box's <b>top-right ✕ to end the mask at the current frame</b> (kept before, gone from
         there on); to remove it across all time use its chip ✕ or <kbd>Delete</kbd>. Masks are applied on
         export only while they're active.
