@@ -1,0 +1,137 @@
+:root {
+  --bg: #0e1116;
+  --panel: #171b22;
+  --panel-2: #1f242d;
+  --border: #2a313c;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --accent: #4f9dff;
+  --accent-2: #2ea043;
+  --danger: #f85149;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+#app { max-width: 1100px; margin: 0 auto; padding: 24px 20px 60px; }
+
+h1 { font-size: 22px; margin: 0 0 2px; }
+h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 12px; }
+.sub { color: var(--muted); margin: 0 0 24px; }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px;
+  margin-bottom: 18px;
+}
+
+.row { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+.col { display: flex; flex-direction: column; gap: 10px; }
+.grow { flex: 1; }
+
+button {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #04101f; font-weight: 600; }
+button.good { background: var(--accent-2); border-color: var(--accent-2); color: #04120a; font-weight: 600; }
+
+label.field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+select, input[type="text"] {
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 14px;
+}
+
+.dropoverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(4, 16, 31, 0.72);
+  pointer-events: none; /* let the drop event reach the window handler */
+}
+.dropoverlay-box {
+  border: 2px dashed var(--accent);
+  border-radius: 14px;
+  padding: 28px 44px;
+  font-size: 18px;
+  font-weight: 600;
+  color: #fff;
+  background: rgba(79, 157, 255, 0.12);
+}
+
+.stagewrap {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  max-width: 100%;
+}
+.stage {
+  max-width: 100%;
+  max-height: 72vh;   /* keep the whole frame on screen, incl. portrait videos */
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: 10px;
+  display: block;
+  margin: 0 auto;
+  background: #000;
+}
+video.hidden { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+
+.chips { display: flex; gap: 8px; flex-wrap: wrap; }
+.chip {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 999px; padding: 4px 10px 4px 4px; font-size: 13px;
+}
+.chip img { width: 34px; height: 34px; border-radius: 50%; object-fit: cover; }
+.chip button { padding: 2px 6px; font-size: 12px; border-radius: 6px; }
+
+.pills { display: flex; gap: 6px; flex-wrap: wrap; }
+.pill {
+  padding: 6px 12px; border-radius: 999px; border: 1px solid var(--border);
+  background: var(--panel-2); cursor: pointer; user-select: none; font-size: 13px;
+}
+.pill.active { background: var(--accent); border-color: var(--accent); color: #04101f; font-weight: 600; }
+
+.emoji-grid { display: flex; gap: 6px; flex-wrap: wrap; }
+.emoji-grid .pill { font-size: 20px; padding: 4px 8px; line-height: 1; }
+
+.progress { height: 8px; background: var(--panel-2); border-radius: 999px; overflow: hidden; border: 1px solid var(--border); }
+.progress > i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .2s; }
+
+.status { color: var(--muted); font-size: 13px; }
+.hint { color: var(--muted); font-size: 12px; }
+.err { color: var(--danger); }
+a.dl { color: var(--accent); font-weight: 600; }
+button.linklike {
+  background: none; border: none; padding: 0; color: var(--accent);
+  font: inherit; cursor: pointer; text-decoration: underline;
+}
+button.linklike:hover:not(:disabled) { border: none; }
+
+.dropzone {
+  border: 1.5px dashed var(--border); border-radius: 12px; padding: 40px; text-align: center;
+  color: var(--muted); cursor: pointer; transition: border-color .15s, background .15s;
+}
+.dropzone.hot { border-color: var(--accent); background: rgba(79,157,255,.06); }
