@@ -18,7 +18,11 @@
 // and keep CORE's version compatible with the installed @ffmpeg/ffmpeg. A stale
 // worker vs. core mismatch shows up as load() hanging (caught by the 30s timeout).
 const CORE = 'https://unpkg.com/@ffmpeg/core@0.12.9/dist/esm';
-const CLASS_WORKER_URL = '/ffmpeg/worker.js'; // served from public/ (same-origin)
+// Self-hosted worker from public/ (same-origin). Resolved against Vite's BASE_URL
+// (from vite.config `base`) so it stays correct under a subpath deploy such as a
+// GitHub Pages project site (/<repo>/ffmpeg/worker.js). BASE_URL always ends in
+// '/'. Falls back to '/' outside a bundler (e.g. tests).
+const CLASS_WORKER_URL = (import.meta.env?.BASE_URL || '/') + 'ffmpeg/worker.js';
 
 let ffmpeg = null;
 let loaded = false;
@@ -86,6 +90,65 @@ export async function normalizeInput(source, onProgress, { maxDim = 1280 } = {})
     await ffmpeg.deleteFile('norm.mp4');
   } catch (_) {}
   return new Blob([data.buffer], { type: 'video/mp4' });
+}
+
+// Mux the ORIGINAL audio track into an already-encoded (WebCodecs) MP4 video.
+// The video stream is copied verbatim (-c:v copy) — its frames/timestamps are
+// already frame-exact from the WebCodecs pass — and only the audio is (re)encoded
+// to AAC. If the source has no audio track, the video MP4 is returned unchanged
+// (and ffmpeg isn't even needed). Returns an MP4 Blob.
+export async function muxAudioIntoMp4(videoMp4, audioSource, onProgress, durationHint = 0) {
+  if (!audioSource) { onProgress?.(1); return videoMp4; }
+  if (!loaded) throw new Error('ffmpeg not initialized');
+
+  ffmpeg.off?.('progress');
+  let sawNative = false;
+  if (onProgress) {
+    ffmpeg.on('progress', ({ progress, time }) => {
+      if (Number.isFinite(progress) && progress > 0) { sawNative = true; onProgress(Math.min(1, progress)); }
+      else if (durationHint > 0 && Number.isFinite(time)) onProgress(Math.min(1, (time / 1e6) / durationHint));
+    });
+  }
+  const onLog = ({ message }) => {
+    const t = parseTime(message);
+    if (t != null && onProgress && !sawNative && durationHint > 0) onProgress(Math.min(1, t / durationHint));
+  };
+  ffmpeg.on('log', onLog);
+
+  await ffmpeg.writeFile('vid.mp4', await fetchFile(videoMp4));
+  await ffmpeg.writeFile('aud.bin', await fetchFile(audioSource));
+
+  let out;
+  try {
+    await ffmpeg.exec([
+      '-i', 'vid.mp4',
+      '-i', 'aud.bin',
+      '-map', '0:v:0',
+      '-map', '1:a:0?',   // '?' → tolerate a source with no audio stream
+      '-c:v', 'copy',
+      '-c:a', 'aac',
+      '-b:a', '160k',
+      '-movflags', '+faststart',
+      '-shortest',
+      'muxed.mp4',
+    ]);
+    out = await ffmpeg.readFile('muxed.mp4');
+  } catch (e) {
+    // Source had no usable audio (or a mux quirk) → fall back to the silent video.
+    console.warn('[FaceBlind][mux] audio mux failed, returning video-only', e?.message || e);
+    ffmpeg.off?.('log', onLog);
+    onProgress?.(1);
+    return videoMp4;
+  }
+
+  ffmpeg.off?.('log', onLog);
+  onProgress?.(1);
+  try {
+    await ffmpeg.deleteFile('vid.mp4');
+    await ffmpeg.deleteFile('aud.bin');
+    await ffmpeg.deleteFile('muxed.mp4');
+  } catch (_) {}
+  return new Blob([out.buffer], { type: 'video/mp4' });
 }
 
 // Parse "time=00:00:04.00" (or "time=4.00") from an ffmpeg log line → seconds.

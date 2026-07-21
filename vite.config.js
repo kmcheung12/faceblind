@@ -5,6 +5,10 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 // single-threaded ffmpeg.wasm core (no SharedArrayBuffer required) so that
 // MediaPipe / face-api model files can still be pulled from public CDNs.
 export default defineConfig({
+  // Public base path. Defaults to '/' (root domain / user page / custom domain).
+  // For a GitHub Pages *project* site the app is served under /<repo>/, so build
+  // with e.g. `BASE_PATH=/faceblind/ npm run build`. Must keep the trailing slash.
+  base: process.env.BASE_PATH || '/',
   plugins: [svelte()],
   optimizeDeps: {
     // face-api ships its own tfjs; let esbuild pre-bundle it cleanly.

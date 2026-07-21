@@ -3,7 +3,9 @@
 In-browser video face blurs / pixelates / replaces them with an emoji — then re-encodes to
 MP4. **Everything runs locally in the browser; no video ever leaves the machine.** Optionally support a fast mask video generation, which you can further process with ffmpeg locally.
 
-> **Browser support:** currently tested on **desktop Chrome only**. The pipeline relies on `requestVideoFrameCallback` and WebM
+Demo: https://kmcheung12.github.io/faceblind/
+
+> **Browser support:** currently tested on **desktop Chrome and Firefox only**. The pipeline relies on `requestVideoFrameCallback` and WebM
 > `MediaRecorder`, which Firefox and Safari don't (fully) support.
 
 ## Stack
@@ -46,6 +48,24 @@ npx serve dist        # http://localhost:3000
 ```
 
 Then open the printed URL (e.g. http://localhost:8000) in Chrome.
+
+### Deploying under a sub-path
+
+The app is fully static and needs no special headers (it uses the single-threaded
+ffmpeg.wasm core, so no cross-origin isolation). At a root domain, user page
+(`kmcheung12.github.io`), or custom domain, `npm run build` works as-is.
+
+To serve under a sub-path `/<repo>/` (e.g.
+`https://kmcheung12.github.io/faceblind/`), set the base path at build time so asset and
+worker URLs resolve correctly (the ffmpeg worker in particular — a wrong path
+makes MP4 export hang):
+
+```bash
+BASE_PATH=/faceblind/ npm run build   # keep the trailing slash
+```
+
+`BASE_PATH` feeds Vite's `base`; the self-hosted ffmpeg worker path is derived
+from it automatically.
 
 Requires a Chromium-based browser (uses `requestVideoFrameCallback`,
 `canvas.captureStream`, `MediaRecorder`, WebGL). Models are fetched from public

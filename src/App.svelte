@@ -5,7 +5,8 @@
   import { Tracker } from './lib/tracker.js';
   import { renderFrame, processVideo, processRegions } from './lib/processor.js';
   import { initPose } from './lib/pose.js';
-  import { initFFmpeg, encodeMp4, normalizeInput } from './lib/encoder.js';
+  import { initFFmpeg, encodeMp4, muxAudioIntoMp4, normalizeInput } from './lib/encoder.js';
+  import { processVideoWebCodecs, webcodecsSupported } from './lib/webcodecs.js';
   import { applyEffect } from './lib/effects.js';
   import { newMask, setKeyframe, maskBoxAt, hasKeyframeAt, removeKeyframeAt, suppressBoxesAt, boxSuppressed, endMaskAt, startMaskAt, clearLifespan } from './lib/masks.js';
 
@@ -23,6 +24,7 @@
   let file = null;
   let videoURL = '';
   let ready = false;          // video metadata loaded
+  let curTime = 0;            // current playhead (keeps the scrub slider in sync)
   let detectorReady = false;
   let dragHot = false;
   let converting = false;     // running an ffmpeg compatibility normalize pass
@@ -57,6 +59,8 @@
   // processing
   let phase = 'idle';         // idle | processing | encoding | done
   let procProgress = 0;
+  let procEtaSec = null;      // estimated seconds remaining for the render pass
+  let _procAnchor = null;     // {t,p} sample taken after warm-up, for rate calc
   let encProgress = 0;
   let statusMsg = '';
   let errorMsg = '';
@@ -330,7 +334,7 @@
     }
   }
 
-  function onSeeked() { previewCurrent(); }
+  function onSeeked() { curTime = videoEl.currentTime || 0; previewCurrent(); }
 
   // ---- canvas pointer interaction ----
   function toCanvas(e) {
@@ -630,37 +634,81 @@
     if (!people.length && mode !== 'all') mode = 'all';
   }
 
+  // Update the render-pass ETA from a progress fraction. Anchors a timing sample
+  // only after warm-up (≥5%) — the first frames are unrepresentative (model warm-up,
+  // first-seek keyframe decode) — then extrapolates the steady rate to 100%.
+  function updateProcEta(p) {
+    procProgress = p;
+    const now = performance.now();
+    if (!_procAnchor && p >= 0.05) _procAnchor = { t: now, p };
+    if (_procAnchor && p > _procAnchor.p && p < 0.999) {
+      const rate = (p - _procAnchor.p) / (now - _procAnchor.t); // fraction per ms
+      procEtaSec = rate > 0 ? Math.max(0, (1 - p) / rate / 1000) : null;
+    }
+  }
+  function fmtEta(sec) {
+    if (sec == null || !isFinite(sec)) return '';
+    const s = Math.round(sec);
+    if (s < 60) return `~${s}s left`;
+    const m = Math.floor(s / 60);
+    return `~${m}m ${String(s % 60).padStart(2, '0')}s left`;
+  }
+
   async function run() {
     if (!ready) return;
     errorMsg = '';
     resultURL = '';
     phase = 'processing';
     procProgress = 0; encProgress = 0;
+    procEtaSec = null; _procAnchor = null;
     statusMsg = 'Processing frames…';
     try {
-      let srcFps = 0;
-      const webm = await processVideo({
-        video: videoEl,
-        canvas: canvasEl,
-        opts: { ...opts, showBoxes: false },
-        people,
-        onProgress: (p) => (procProgress = p),
-        onFps: (f) => (srcFps = f),
-      });
-      console.log('[FaceBlind][run] recorded webm', {
-        MB: +((webm?.size || 0) / 1e6).toFixed(2), durationSec: +(videoEl.duration || 0).toFixed(2),
-      });
-      if (!webm || !webm.size) throw new Error('Recording produced an empty video (0 bytes).');
+      let mp4;
+      if (webcodecsSupported()) {
+        // Frame-exact path: decode → render → encode one frame per source frame,
+        // at the source's own fps (same frame count/timing as a local ffmpeg run).
+        statusMsg = 'Processing frames (frame-exact)…';
+        const { blob: videoMp4, fps } = await processVideoWebCodecs({
+          video: videoEl,
+          canvas: canvasEl,
+          opts: { ...opts, showBoxes: false },
+          people,
+          onProgress: (p) => updateProcEta(p),
+        });
+        console.log('[FaceBlind][run] webcodecs video', {
+          MB: +((videoMp4?.size || 0) / 1e6).toFixed(2), fps: +fps.toFixed(2),
+        });
+        if (!videoMp4 || !videoMp4.size) throw new Error('Encoding produced an empty video (0 bytes).');
 
-      phase = 'encoding';
-      statusMsg = 'Loading ffmpeg.wasm…';
-      await initFFmpeg((m) => (ffmpegLog = m));
-      statusMsg = 'Encoding MP4 (+ original audio)…';
-      // Match the output fps to the SOURCE video (measured during the pass), so we
-      // don't inherit MediaRecorder's bogus ~1000fps timebase. Fall back to 30.
-      const outFps = srcFps > 1 ? Math.round(srcFps) : (opts.fps || 30);
-      console.log('[FaceBlind][run] measured source fps', { srcFps: +srcFps.toFixed(2), outFps });
-      const mp4 = await encodeMp4(webm, file, (p) => (encProgress = p), videoEl.duration || 0, outFps);
+        phase = 'encoding';
+        statusMsg = 'Loading ffmpeg.wasm…';
+        await initFFmpeg((m) => (ffmpegLog = m));
+        statusMsg = 'Muxing original audio…';
+        mp4 = await muxAudioIntoMp4(videoMp4, file, (p) => (encProgress = p), videoEl.duration || 0);
+      } else {
+        // Fallback: real-time MediaRecorder capture → ffmpeg transcode.
+        let srcFps = 0;
+        const webm = await processVideo({
+          video: videoEl,
+          canvas: canvasEl,
+          opts: { ...opts, showBoxes: false },
+          people,
+          onProgress: (p) => updateProcEta(p),
+          onFps: (f) => (srcFps = f),
+        });
+        console.log('[FaceBlind][run] recorded webm', {
+          MB: +((webm?.size || 0) / 1e6).toFixed(2), durationSec: +(videoEl.duration || 0).toFixed(2),
+        });
+        if (!webm || !webm.size) throw new Error('Recording produced an empty video (0 bytes).');
+
+        phase = 'encoding';
+        statusMsg = 'Loading ffmpeg.wasm…';
+        await initFFmpeg((m) => (ffmpegLog = m));
+        statusMsg = 'Encoding MP4 (+ original audio)…';
+        const outFps = srcFps > 1 ? Math.round(srcFps) : (opts.fps || 30);
+        console.log('[FaceBlind][run] measured source fps', { srcFps: +srcFps.toFixed(2), outFps });
+        mp4 = await encodeMp4(webm, file, (p) => (encProgress = p), videoEl.duration || 0, outFps);
+      }
 
       resultURL = URL.createObjectURL(mp4);
       phase = 'done';
@@ -795,7 +843,11 @@
   $: exportFile = effect === 'emoji' ? 'faceblind-emoji-overlay.webm' : 'faceblind-mask.webm';
   // The mask is captured fast (short webm); setpts stretches it back to the true
   // duration so it lines up with the source. Runs on the user's native ffmpeg.
-  $: retime = `setpts=${maskStretch}*PTS`;
+  // Subtract STARTPTS first: MediaRecorder stamps its first frame with a small
+  // startup-latency offset, and scaling that by maskStretch (~4×) would push the
+  // mask's start to ~0.5s — leaving the opening half-second unmasked. Zeroing the
+  // base PTS pins the first mask frame to output t=0 (i.e. source t≈0).
+  $: retime = `setpts=${maskStretch}*(PTS-STARTPTS)`;
   $: maskReveal =
     `[1:v]${retime},format=gray,lutyuv=y='if(gt(val,90),255,0)'[m];` +
     `[fg][m]alphamerge[fga];[0:v][fga]overlay=shortest=1[out]`;
@@ -921,7 +973,7 @@
     {#if ready}
       <div class="row" style="margin-top:12px">
         <input type="range" min="0" max={videoEl?.duration || 0} step="0.05"
-          style="flex:1"
+          style="flex:1" value={curTime}
           on:input={(e) => { videoEl.currentTime = +e.target.value; }} />
         <button on:click={() => onFile(null) || (videoURL = '', ready = false)}>Change video</button>
       </div>
@@ -1064,7 +1116,10 @@
     {#if statusMsg}<p class="status" style="margin-top:10px">{statusMsg}</p>{/if}
 
     {#if phase === 'processing'}
-      <p class="hint" style="margin-top:12px">Detecting & rendering ({Math.round(procProgress * 100)}%)</p>
+      <p class="hint" style="margin-top:12px">
+        Detecting & rendering ({Math.round(procProgress * 100)}%)
+        {#if procEtaSec != null}<span style="opacity:.7"> · {fmtEta(procEtaSec)}</span>{/if}
+      </p>
       <div class="progress"><i style="width:{procProgress * 100}%"></i></div>
     {/if}
     {#if phase === 'encoding'}

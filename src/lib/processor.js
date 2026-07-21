@@ -197,13 +197,16 @@ export function processVideo({ video, canvas, opts, people, onProgress, onCaptur
     // the matte. Capped at 60 (display/compositor limit). At speed 1 this is just
     // the base fps. Effective mask fps ≈ capFps / captureSpeed.
     const baseFps = opts.fps || 30;
-    const capFps = Math.min(60, baseFps * (opts.captureSpeed || 1));
-    const stream = canvas.captureStream(capFps);
+    // Manual capture: with a 0 frame rate the stream emits a frame ONLY when we
+    // call track.requestFrame(), so we control exactly what lands in the recording
+    // and emit precisely one frame per presented source frame (no temporal
+    // resolution thrown away at high captureSpeed). CRITICAL: the stream + recorder
+    // are created lazily in begin(), AFTER the first matte is painted — a stream
+    // created on the freshly-cleared (black) canvas emits that black frame at pts 0,
+    // which, stretched ~Nx by the local setpts, leaves the opening ~0.5s unmasked.
     const mimeType = pickMime();
-    const recorder = new MediaRecorder(stream, {
-      mimeType,
-      videoBitsPerSecond: opts.bitrate || 8_000_000,
-    });
+    let stream = null, captureTrack = null, recorder = null;
+    let emitFrame = () => {};
     const chunks = [];
     let startedAt = 0, capturedSec = 0;
     // Measure the SOURCE video's real frame rate from the presented-frame metadata
@@ -212,13 +215,6 @@ export function processVideo({ video, canvas, opts, people, onProgress, onCaptur
     // WebM has only a 1kHz timebase and no true fps, so without a target ffmpeg
     // would guess ~1000fps and pad the file with ~30× duplicate frames.
     let firstMediaTime = null, lastMediaTime = null, frameCount = 0, srcFps = 0;
-    recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
-    recorder.onstop = () => {
-      onCaptured?.(capturedSec);
-      onFps?.(srcFps);
-      resolve(new Blob(chunks, { type: 'video/webm' }));
-    };
-    recorder.onerror = (e) => reject(e.error || new Error('recorder error'));
 
     let stopped = false;
     const finish = () => {
@@ -229,7 +225,7 @@ export function processVideo({ video, canvas, opts, people, onProgress, onCaptur
       if (frameCount > 1 && span > 0) srcFps = (frameCount - 1) / span;
       video.pause();
       video.playbackRate = 1;
-      if (recorder.state !== 'inactive') recorder.stop();
+      if (recorder && recorder.state !== 'inactive') recorder.stop();
     };
 
     const tick = (now, meta) => {
@@ -240,6 +236,7 @@ export function processVideo({ video, canvas, opts, people, onProgress, onCaptur
         frameCount++;
       }
       renderFrame(ctx, video, tracker, opts, people);
+      emitFrame(); // push this rendered frame into the recording
       onProgress?.(video.duration ? video.currentTime / video.duration : 0);
       if (video.ended) { finish(); return; }
       video.requestVideoFrameCallback(tick);
@@ -256,8 +253,26 @@ export function processVideo({ video, canvas, opts, people, onProgress, onCaptur
     // high captureSpeed that lost head is several tenths of a second of *source*
     // time, leaving the opening of the video un-obscured.
     const begin = () => {
-      renderFrame(ctx, video, tracker, opts, people); // paint the t≈0 matte first
+      // 1) Paint the t≈0 matte, THEN create the capture stream — so the stream's
+      //    initial frame is the matte, never the cleared black canvas.
+      renderFrame(ctx, video, tracker, opts, people);
+      stream = canvas.captureStream(0);
+      captureTrack = stream.getVideoTracks()[0];
+      emitFrame = () => captureTrack?.requestFrame?.();
+      recorder = new MediaRecorder(stream, {
+        mimeType,
+        videoBitsPerSecond: opts.bitrate || 8_000_000,
+      });
+      recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+      recorder.onstop = () => {
+        onCaptured?.(capturedSec);
+        onFps?.(srcFps);
+        resolve(new Blob(chunks, { type: 'video/webm' }));
+      };
+      recorder.onerror = (e) => reject(e.error || new Error('recorder error'));
+      // 2) Record, explicitly emit frame 0 (the matte), then play.
       recorder.start();
+      emitFrame();
       startedAt = performance.now();
       video.play()
         .then(() => video.requestVideoFrameCallback(tick))
